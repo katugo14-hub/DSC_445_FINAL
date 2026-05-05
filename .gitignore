@@ -1,7 +1,29 @@
-*.npy
-*.pkl
-*.npz
+# macOS
+.DS_Store
+
+# PyCharm / IDE files
+.idea/
+
+# Python
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
+
+# Data and generated outputs
+data/raw/
+data/processed/
+data/experiments/
+outputs/
 processed_data/
-data/
+
+# Large files
+*.pkl
+*.h5
+*.zip
+*.csv
+*.npy
+*.npz
+
+# Models/results
+models/
+results/
