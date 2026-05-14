@@ -14,7 +14,7 @@ from scipy.signal import resample, butter, filtfilt
 warnings.filterwarnings("ignore", message=r".*dtype\(\): align should be passed.*")
 
 #Set path of dataset folder
-data_dir = r"C:\Users\Smith\OneDrive\Desktop\ML Class Project\PPG_DaLiA_Project\data"
+data_dir = r"C:\Users\YourName\Downloads\PPG_DaLiA_Project\data"
 output_dir = "processed_data"
 os.makedirs(output_dir, exist_ok=True)
 
