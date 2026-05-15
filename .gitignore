@@ -27,3 +27,4 @@ processed_data/
 # Models/results
 models/
 results/
+tests/
