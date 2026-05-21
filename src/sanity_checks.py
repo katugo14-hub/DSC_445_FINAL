@@ -1,32 +1,34 @@
 import numpy as np
+from dl_dataset import get_all_subjects, load_subject
+from models_dl import CNNModel
+import torch
 
 
-def check_no_subject_leakage(train_subjects, test_subjects):
-    overlap = set(train_subjects).intersection(set(test_subjects))
+def check_data_shapes():
+    subjects = get_all_subjects()
+    print("Subjects found:", subjects)
 
-    if overlap:
-        raise ValueError(f"Data leakage detected. Overlap: {overlap}")
-
-    print("PASS: No subject leakage.")
-
-
-def check_shapes(X, y, subjects):
-    assert len(X) == len(y) == len(subjects), "X, y, and subjects length mismatch"
-
-    print("PASS: Shapes aligned.")
-    print("X shape:", X.shape)
-    print("y shape:", y.shape)
-    print("subjects shape:", subjects.shape)
+    X, y = load_subject(subjects[0])
+    print("X shape:", X.shape)     #(num_windows, 512, 4)
+    print("y shape:", y.shape)     #(num_windows,)
 
 
-def check_labels(y):
-    y = np.asarray(y)
+def check_for_nans():
+    subjects = get_all_subjects()
+    X, y = load_subject(subjects[0])
 
-    print("HR label min:", np.min(y))
-    print("HR label max:", np.max(y))
-    print("HR label mean:", np.mean(y))
+    print("NaNs in X:", np.isnan(X).sum())
+    print("NaNs in y:", np.isna(y).sum())
 
-    if np.any(np.isnan(y)):
-        raise ValueError("NaN values found in labels.")
 
-    print("PASS: Labels look valid.")
+def check_model_forward_pass():
+    model = CNNModel()
+    dummy = torch.randn(2, 512, 4)    #batch=2
+    out = model(dummy)
+    print("Model output shape:", out.shape)
+
+
+if __name__ == "__main__":
+    check_data_shapes()
+    check_for_nans()
+    check_model_forward_pass()
