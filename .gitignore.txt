@@ -1,0 +1,5 @@
+data/*.pkl
+data/processed_data/*
+processed_data/*
+__pycache__/
+*.pyc
