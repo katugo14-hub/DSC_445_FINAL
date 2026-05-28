@@ -7,9 +7,12 @@ from pathlib import Path
 from scipy.signal import butter, filtfilt, resample
 
 #Paths
-DATA_DIR = Path(__file__).resolve().parents[1]/"data"
-OUTPUT_DIR = Path(__file__).resolve().parents[1]/"data"/"processed_data"
-OUTPUT_DIR.mkdir(exist_ok=True)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR     = PROJECT_ROOT / "data"
+# Raw subject pkl files live at: data/raw/ppg+dalia/PPG_FieldStudy/S<N>/S<N>.pkl
+RAW_DIR      = DATA_DIR / "raw" / "ppg+dalia" / "PPG_FieldStudy"
+OUTPUT_DIR   = PROJECT_ROOT / "outputs" / "processed_data"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_subject(path):
     """load one subject safely"""
@@ -30,7 +33,7 @@ def preprocess_subject(subject_path):
     #extract signals
     ppg = data["signal"]["wrist"]["BVP"]
     acc = data["signal"]["wrist"]["ACC"]
-    hr = data["label"]["HR"]
+    hr = data["label"]          # PPG-DaLiA: data["label"] is the HR array directly
 
     #filter PPG
     fs = 64
@@ -65,8 +68,8 @@ def preprocess_subject(subject_path):
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.float32)
 
-    np.save(OUTPUT_DIR / f"{subject_id}_X.npy", X)
-    np.save(OUTPUT_DIR / f"{subject_id}_y.npy", y)
+    np.save(OUTPUT_DIR / f"{subject_id}_ppg_acc.npy", X)   # shape (N, 512, 4)
+    np.save(OUTPUT_DIR / f"{subject_id}_y.npy", y)         # shape (N,)
 
     print(f"Saved {len(X)} windows for {subject_id}.")
 
@@ -78,7 +81,8 @@ def preprocess_subject(subject_path):
 
 def preprocess_all_subjects():
     """process all subjects safely"""
-    subject_files = sorted (glob.glob(str(DATA_DIR/"S*.pkl")))
+    # Files are nested: data/raw/ppg+dalia/PPG_FieldStudy/S<N>/S<N>.pkl
+    subject_files = sorted(glob.glob(str(RAW_DIR / "S*" / "*.pkl")))
 
     if not subject_files:
         print("No subject files found. Check DATA_DIR path.")

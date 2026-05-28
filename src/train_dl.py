@@ -1,150 +1,216 @@
+import copy
+import json
+import csv
+import time
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
+from pathlib import Path
 
 from dl_dataset import get_loso_split, get_all_subjects, WindowDataset
 from models_dl import CNNModel, CNNLSTMModel
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RESULTS_DIR  = PROJECT_ROOT / "outputs" / "week3"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Train for one epoch
+# ── Low-level training helpers ────────────────────────────────────────────────
+
 def train_one_epoch(model, loader, optimizer, criterion, device):
     model.train()
-    total_loss = 0
-
+    total_loss = 0.0
     for X, y in loader:
         X, y = X.to(device), y.to(device)
-
         optimizer.zero_grad()
         preds = model(X).squeeze()
         loss = criterion(preds, y)
         loss.backward()
-
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
-
         total_loss += loss.item()
-
     return total_loss / len(loader)
 
 
-#validate
-def validate(model, loader, criterion, device):
+def evaluate(model, loader, device):
+    """Returns MAE and RMSE over the full loader."""
     model.eval()
-    total_loss = 0
-
+    all_preds, all_targets = [], []
     with torch.no_grad():
         for X, y in loader:
             X, y = X.to(device), y.to(device)
-            pred = model(X).squeeze()
-            loss = criterion(pred, y)
-            total_loss += loss.item()
+            preds = model(X).squeeze()
+            all_preds.append(preds.cpu().numpy())
+            all_targets.append(y.cpu().numpy())
+    preds_np   = np.concatenate(all_preds)
+    targets_np = np.concatenate(all_targets)
+    mae  = float(np.mean(np.abs(preds_np - targets_np)))
+    rmse = float(np.sqrt(np.mean((preds_np - targets_np) ** 2)))
+    return mae, rmse
 
-    return total_loss / len(loader)
 
+# ── Hyperparameter tuning (fast 18-combination grid on one val subject) ───────
 
-#Hyperparameter tuning using ONE validation subject
 def tune_hyperparameters(model_class, val_subject="S2", device="cpu"):
-
+    """
+    Runs a compact 18-trial grid (not 162!) against one held-out validation
+    subject and returns the best hyperparameter dict.
+    Each trial trains for 5 quick epochs — just enough to rank configs.
+    """
     all_subjects = get_all_subjects()
     X_train, y_train, X_val, y_val = get_loso_split(val_subject, all_subjects)
 
-    #convert to PyTorch datasets
     train_ds = WindowDataset(X_train, y_train)
-    val_ds = WindowDataset(X_val, y_val)
+    val_ds   = WindowDataset(X_val,   y_val)
 
-    #Hyperparameter search space
-    learning_rates = [1e-4, 3e-4, 1e-3]
-    dropouts = [0.0, 0.2, 0.5]
-    batch_sizes = [8, 16, 32]
-    filter_sizes = [32, 64]
-    kernel_sizes = [3,5,7]
+    # Compact search space — 3×2×3 = 18 combos (was 162, took hours)
+    search_space = [
+        {"lr": lr, "dropout": dropout, "batch_size": bs, "num_filters": nf, "kernel_size": ks}
+        for lr      in [3e-4, 1e-3]
+        for dropout in [0.2, 0.4]
+        for bs      in [32, 64]
+        for nf      in [32, 64]
+        for ks      in [5, 7]
+    ]
 
-    best_val_loss = float("inf")
-    best_hparams = None
+    criterion     = nn.L1Loss()
+    best_val_mae  = float("inf")
+    best_hparams  = None
+    TUNE_EPOCHS   = 5   # cheap ranking pass
 
-    criterion = nn.L1Loss()     #MAE
+    print(f"[tune] Running {len(search_space)} hyperparameter combinations on {val_subject}...")
+    for i, hp in enumerate(search_space, 1):
+        model     = model_class(num_filters=hp["num_filters"],
+                                dropout=hp["dropout"],
+                                kernel_size=hp["kernel_size"]).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=hp["lr"])
 
-    for lr in learning_rates:
-        for dropout in dropouts:
-            for bs in batch_sizes:
-                for nf in filter_sizes:
-                    for ks in kernel_sizes:
+        train_loader = DataLoader(train_ds, batch_size=hp["batch_size"], shuffle=True,  num_workers=0)
+        val_loader   = DataLoader(val_ds,   batch_size=hp["batch_size"], shuffle=False, num_workers=0)
 
-                        print(f"Tuning: lr={lr}, dropout={dropout}, batch={bs}, filters={nf}, ks={ks}")
+        for _ in range(TUNE_EPOCHS):
+            train_one_epoch(model, train_loader, optimizer, criterion, device)
 
-                        model = model_class(num_filters=nf, dropout=dropout, kernel_size=ks).to(device)
-                        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        val_mae, _ = evaluate(model, val_loader, device)
+        print(f"  [{i:2d}/{len(search_space)}] lr={hp['lr']:.0e} do={hp['dropout']} "
+              f"bs={hp['batch_size']} nf={hp['num_filters']} ks={hp['kernel_size']} "
+              f"→ val MAE={val_mae:.3f}")
 
-                        train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True)
-                        val_loader = DataLoader(val_ds, batch_size=bs, shuffle=False)
+        if val_mae < best_val_mae:
+            best_val_mae = val_mae
+            best_hparams = hp
 
-                        #Train for a few epochs
-                        for epoch in range(3):
-                            train_one_epoch(model, train_loader, optimizer, criterion, device)
-
-                        #validate
-                        val_loss = validate(model, val_loader, criterion, device)
-
-                        print(f"Validation MAE: {val_loss:.4f}")
-
-                        if val_loss < best_val_loss:
-                            best_val_loss = val_loss
-                            best_hparams = {
-                                "lr": lr,
-                                "dropout": dropout,
-                                "batch_size": bs,
-                                "num_filters": nf,
-                                "kernel_size": ks
-                            }
-    print("\nBest Hyperparameters Found:")
-    print(best_hparams)
-
-
+    print(f"\n[tune] Best hparams (val MAE={best_val_mae:.3f}): {best_hparams}")
     return best_hparams
 
 
-#Full LOSO training using fixed hyperparameters
-def train_loso(model_class, hparams, device="cpu"):
+# ── Full LOSO with early stopping ─────────────────────────────────────────────
 
+def train_loso(model_class, hparams, device="cpu", max_epochs=40, patience=8,
+               model_name="model"):
+    """
+    LOSO cross-validation with early stopping (patience on val loss from a
+    10% held-out slice of each training fold).
+    Saves per-fold results + aggregate summary to outputs/week3/.
+    Returns dict: {subject: {"mae": float, "rmse": float}}
+    """
     all_subjects = get_all_subjects()
-    criterion = nn.L1Loss()    #MAE
-
-    results = {}
+    results      = {}
+    rows         = []   # for CSV
 
     for test_sub in all_subjects:
-        print(f"\n--- LOSO Fold: Testing on {test_sub} ---")
+        t0 = time.time()
+        print(f"\n[LOSO] {model_name} | held-out: {test_sub}")
 
-        X_train, y_train, X_test, y_test = get_loso_split(test_sub, all_subjects)
+        X_train_full, y_train_full, X_test, y_test = get_loso_split(test_sub, all_subjects)
 
-        train_ds = WindowDataset(X_train, y_train)
-        test_ds = WindowDataset(X_test, y_test)
+        # Hold out 10% of training data as a validation set for early stopping
+        n_val   = max(1, int(len(X_train_full) * 0.10))
+        idx     = np.random.permutation(len(X_train_full))
+        val_idx = idx[:n_val]
+        tr_idx  = idx[n_val:]
 
-        train_loader = DataLoader(train_ds, batch_size=hparams["batch_size"], shuffle=True)
-        test_loader = DataLoader(test_ds, batch_size=hparams["batch_size"], shuffle=False)
+        X_tr,  y_tr  = X_train_full[tr_idx],  y_train_full[tr_idx]
+        X_val, y_val = X_train_full[val_idx], y_train_full[val_idx]
 
-        #Build model with tuned hyperparameters
-        model = model_class(
-            num_filters = hparams["num_filters"],
-            dropout = hparams["dropout"],
-            kernel_size = hparams["kernel_size"]
-        ).to(device)
+        train_ds = WindowDataset(X_tr,   y_tr)
+        val_ds   = WindowDataset(X_val,  y_val)
+        test_ds  = WindowDataset(X_test, y_test)
 
+        bs = hparams["batch_size"]
+        train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True,  num_workers=0)
+        val_loader   = DataLoader(val_ds,   batch_size=bs, shuffle=False, num_workers=0)
+        test_loader  = DataLoader(test_ds,  batch_size=bs, shuffle=False, num_workers=0)
+
+        model = model_class(num_filters=hparams["num_filters"],
+                            dropout=hparams["dropout"],
+                            kernel_size=hparams["kernel_size"]).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=hparams["lr"])
+        criterion = nn.L1Loss()
 
-        #Train for fixed epochs
-        for epoch in range(5):
+        # Early stopping
+        best_val_mae   = float("inf")
+        best_state     = copy.deepcopy(model.state_dict())
+        patience_count = 0
+
+        for epoch in range(1, max_epochs + 1):
             train_one_epoch(model, train_loader, optimizer, criterion, device)
+            val_mae, _ = evaluate(model, val_loader, device)
 
-        #Evaluate
-        test_loss = validate(model, test_loader, criterion, device)
-        results[test_sub] = test_loss
+            if val_mae < best_val_mae - 1e-4:
+                best_val_mae   = val_mae
+                best_state     = copy.deepcopy(model.state_dict())
+                patience_count = 0
+            else:
+                patience_count += 1
 
-        print(f"Test MAE for {test_sub}: {test_loss:.4f}")
+            if patience_count >= patience:
+                print(f"  Early stop at epoch {epoch} (val MAE={best_val_mae:.3f})")
+                break
 
-    print("\n---Final LOSO Results---")
-    print(results)
+        # Restore best weights, then evaluate on test
+        model.load_state_dict(best_state)
+        test_mae, test_rmse = evaluate(model, test_loader, device)
+        elapsed = time.time() - t0
 
-    return results
+        results[test_sub] = {"mae": test_mae, "rmse": test_rmse}
+        rows.append({"model": model_name, "subject": test_sub,
+                     "mae": round(test_mae, 4), "rmse": round(test_rmse, 4)})
+
+        print(f"  {test_sub}: MAE={test_mae:.3f}  RMSE={test_rmse:.3f}  ({elapsed:.0f}s)")
+
+    # ── Aggregate summary ──────────────────────────────────────────────────
+    maes  = [v["mae"]  for v in results.values()]
+    rmses = [v["rmse"] for v in results.values()]
+    summary = {
+        "model":     model_name,
+        "mae_mean":  round(float(np.mean(maes)),  3),
+        "mae_std":   round(float(np.std(maes)),   3),
+        "rmse_mean": round(float(np.mean(rmses)), 3),
+        "rmse_std":  round(float(np.std(rmses)),  3),
+        "n_folds":   len(results),
+    }
+
+    print(f"\n{'='*50}")
+    print(f"[{model_name}] LOSO summary ({summary['n_folds']} folds)")
+    print(f"  MAE  = {summary['mae_mean']:.3f} ± {summary['mae_std']:.3f} bpm")
+    print(f"  RMSE = {summary['rmse_mean']:.3f} ± {summary['rmse_std']:.3f} bpm")
+    print(f"{'='*50}")
+
+    # ── Save results ───────────────────────────────────────────────────────
+    csv_path = RESULTS_DIR / f"loso_{model_name}.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["model", "subject", "mae", "rmse"])
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"[save] per-fold results → {csv_path}")
+
+    json_path = RESULTS_DIR / f"summary_{model_name}.json"
+    with open(json_path, "w") as f:
+        json.dump({**summary, "per_subject": results}, f, indent=2)
+    print(f"[save] summary          → {json_path}")
+
+    return results, summary
 
 
 

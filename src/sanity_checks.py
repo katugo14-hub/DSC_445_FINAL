@@ -18,7 +18,7 @@ def check_for_nans():
     X, y = load_subject(subjects[0])
 
     print("NaNs in X:", np.isnan(X).sum())
-    print("NaNs in y:", np.isna(y).sum())
+    print("NaNs in y:", np.isnan(y).sum())
 
 
 def check_model_forward_pass():
