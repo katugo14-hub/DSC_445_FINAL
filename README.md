@@ -178,5 +178,5 @@ data/
 - Ekaterina Golovkina
 - Aayesha Kaleem Syeda
 - Alex Turczynski
-- (Member 4)
+- (Afshaan Fathima Syeda)
 - (Member 5)
