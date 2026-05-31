@@ -2,6 +2,7 @@ import copy
 import json
 import csv
 import time
+import random
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -10,6 +11,19 @@ from pathlib import Path
 
 from dl_dataset import get_loso_split, get_all_subjects, WindowDataset
 from models_dl import CNNModel, CNNLSTMModel
+
+# ── Global seed for full reproducibility ─────────────────────────────────────
+SEED = 42
+
+def set_seed(seed=SEED):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark     = False
+
+set_seed()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR  = PROJECT_ROOT / "outputs" / "week3"
@@ -47,6 +61,20 @@ def evaluate(model, loader, device):
     mae  = float(np.mean(np.abs(preds_np - targets_np)))
     rmse = float(np.sqrt(np.mean((preds_np - targets_np) ** 2)))
     return mae, rmse
+
+
+def causal_smooth(preds, window=5):
+    """Causal moving-median over a 1-D prediction sequence.
+    Each output value uses only the current and (window-1) past predictions,
+    so no future information leaks into the evaluation.
+    Window=5 covers 10 s of signal at 2-second stride — physiologically motivated:
+    HR cannot change faster than ~1-2 bpm/beat, so sharp jumps are artifacts.
+    """
+    smoothed = np.empty_like(preds)
+    for i in range(len(preds)):
+        start = max(0, i - window + 1)
+        smoothed[i] = np.median(preds[start:i + 1])
+    return smoothed
 
 
 # ── Hyperparameter tuning (fast 18-combination grid on one val subject) ───────
@@ -118,7 +146,8 @@ def train_loso(model_class, hparams, device="cpu", max_epochs=40, patience=8,
     results      = {}
     rows         = []   # for CSV
 
-    for test_sub in all_subjects:
+    for fold_i, test_sub in enumerate(all_subjects):
+        set_seed(SEED + fold_i)   # deterministic per fold, independent across folds
         t0 = time.time()
         print(f"\n[LOSO] {model_name} | held-out: {test_sub}")
 
@@ -148,6 +177,11 @@ def train_loso(model_class, hparams, device="cpu", max_epochs=40, patience=8,
         optimizer = torch.optim.Adam(model.parameters(), lr=hparams["lr"])
         criterion = nn.L1Loss()
 
+        # LR scheduler — halves LR after 4 epochs of no val improvement
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=4, min_lr=1e-5
+        )
+
         # Early stopping
         best_val_mae   = float("inf")
         best_state     = copy.deepcopy(model.state_dict())
@@ -156,6 +190,7 @@ def train_loso(model_class, hparams, device="cpu", max_epochs=40, patience=8,
         for epoch in range(1, max_epochs + 1):
             train_one_epoch(model, train_loader, optimizer, criterion, device)
             val_mae, _ = evaluate(model, val_loader, device)
+            scheduler.step(val_mae)          # adjust LR based on val MAE
 
             if val_mae < best_val_mae - 1e-4:
                 best_val_mae   = val_mae
@@ -168,10 +203,24 @@ def train_loso(model_class, hparams, device="cpu", max_epochs=40, patience=8,
                 print(f"  Early stop at epoch {epoch} (val MAE={best_val_mae:.3f})")
                 break
 
-        # Restore best weights, then evaluate on test
+        # Restore best weights, collect raw test predictions, then smooth
         model.load_state_dict(best_state)
-        test_mae, test_rmse = evaluate(model, test_loader, device)
-        elapsed = time.time() - t0
+        model.eval()
+        all_preds, all_targets = [], []
+        with torch.no_grad():
+            for X, y in test_loader:
+                X = X.to(device)
+                all_preds.append(model(X).squeeze().cpu().numpy())
+                all_targets.append(y.numpy())
+        raw_preds  = np.concatenate(all_preds)
+        targets_np = np.concatenate(all_targets)
+
+        # Causal median smoothing (window=5 → 10 s at 2 s stride)
+        smoothed_preds = causal_smooth(raw_preds, window=5)
+
+        test_mae  = float(np.mean(np.abs(smoothed_preds - targets_np)))
+        test_rmse = float(np.sqrt(np.mean((smoothed_preds - targets_np) ** 2)))
+        elapsed   = time.time() - t0
 
         results[test_sub] = {"mae": test_mae, "rmse": test_rmse}
         rows.append({"model": model_name, "subject": test_sub,

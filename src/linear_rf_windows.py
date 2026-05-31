@@ -34,7 +34,7 @@ def create_subject_windows(file_path):
         ppg_window = ppg[ppg_start:ppg_end]
         acc_window = acc[acc_start:acc_end]
 
-        hr_idx = ppg_end // 32
+        hr_idx = ppg_end // 128  # PPG@64Hz / HR_labels@0.5Hz = 128 samples per label
 
         if hr_idx < len(hr):
             y_val = hr[hr_idx]

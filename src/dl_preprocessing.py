@@ -59,7 +59,7 @@ def preprocess_subject(subject_path):
         end = start + win
         X.append(X_full[start:end])
         
-        hr_idx = end//32
+        hr_idx = end//128  # PPG@64Hz / HR_labels@0.5Hz = 128 samples per label
         if hr_idx < len(hr):
             y.append(hr[hr_idx])
         else:
