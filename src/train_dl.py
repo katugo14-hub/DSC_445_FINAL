@@ -77,13 +77,14 @@ def causal_smooth(preds, window=5):
     return smoothed
 
 
-# ── Hyperparameter tuning (fast 18-combination grid on one val subject) ───────
+# ── Hyperparameter tuning (32-trial grid on one fixed val subject) ────────────
 
 def tune_hyperparameters(model_class, val_subject="S2", device="cpu"):
     """
-    Runs a compact 18-trial grid (not 162!) against one held-out validation
-    subject and returns the best hyperparameter dict.
-    Each trial trains for 5 quick epochs — just enough to rank configs.
+    Runs a 32-trial grid (2^5 combinations) against one fixed validation
+    subject (S2) and returns the best hyperparameter dict.
+    Each trial trains for 5 quick epochs — just enough to rank configurations.
+    Note: S2 is used for all HPO, then appears in training for 14/15 LOSO folds.
     """
     all_subjects = get_all_subjects()
     X_train, y_train, X_val, y_val = get_loso_split(val_subject, all_subjects)
@@ -91,7 +92,7 @@ def tune_hyperparameters(model_class, val_subject="S2", device="cpu"):
     train_ds = WindowDataset(X_train, y_train)
     val_ds   = WindowDataset(X_val,   y_val)
 
-    # Compact search space — 3×2×3 = 18 combos (was 162, took hours)
+    # Search space: lr(2) × dropout(2) × bs(2) × nf(2) × ks(2) = 32 trials
     search_space = [
         {"lr": lr, "dropout": dropout, "batch_size": bs, "num_filters": nf, "kernel_size": ks}
         for lr      in [3e-4, 1e-3]

@@ -6,3 +6,4 @@ xgboost>=1.7
 matplotlib>=3.7
 seaborn>=0.12
 joblib>=1.2
+torch>=2.0          # CPU-only: pip install torch --index-url https://download.pytorch.org/whl/cpu
